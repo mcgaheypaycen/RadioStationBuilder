@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+dist/
+*.spec
+*.exe
+
+# Output files
+output/
+
+# Audio files (user content)
+songs/
+voice_segments/
+
+# Python
+__pycache__/
+*.pyc
+

@@ -1,0 +1,21 @@
+{
+  "voice_segments_dir": "C:/RadioStation/voice_segments",
+  "songs_dir": "C:/RadioStation/songs",
+  "output_dir": "C:/RadioStation/output",
+  "songs_between": 2,
+  "crossfade_duration": 3000,
+  "song_fade_duration": 4000,
+  "voice_fade_duration": 800,
+  "enable_ducking": false,
+  "ducking_db": -25,
+  "duck_fade_duration": 400,
+  "segments": [
+    "001_intro",
+    "002_wellness",
+    "003_weather",
+    "004_traffic",
+    "005_headlines",
+    "006_bumper",
+    "007_outro"
+  ]
+}
