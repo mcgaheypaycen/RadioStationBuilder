@@ -53,6 +53,9 @@ class RadioStationApp:
         self.ducking_db = IntVar(value=-15)  # How much to lower music under voice
         self.duck_fade_duration = IntVar(value=500)  # How fast to duck in/out
         
+        # Test mode
+        self.test_mode = BooleanVar(value=False)
+        
         # Default segment order
         self.segments = [
             "001_intro",
@@ -111,14 +114,23 @@ class RadioStationApp:
         notebook.add(ducking_frame, text="🎚️ Ducking")
         self.create_ducking_tab(ducking_frame)
         
-        # Build button
+        # Test mode checkbox and Build button frame
+        build_frame = ttk.Frame(main_frame)
+        build_frame.pack(pady=10)
+        
+        ttk.Checkbutton(
+            build_frame,
+            text="🧪 Test Mode (quick preview)",
+            variable=self.test_mode
+        ).pack(side=LEFT, padx=(0, 20))
+        
         self.build_btn = ttk.Button(
-            main_frame,
+            build_frame,
             text="🎬 Build Radio Show",
             command=self.start_build,
             style="Accent.TButton"
         )
-        self.build_btn.pack(pady=10, ipadx=20, ipady=10)
+        self.build_btn.pack(side=LEFT, ipadx=20, ipady=10)
         
         # Progress bar
         self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
@@ -522,6 +534,7 @@ class RadioStationApp:
             "enable_ducking": self.enable_ducking.get(),
             "ducking_db": self.ducking_db.get(),
             "duck_fade_duration": self.duck_fade_duration.get(),
+            "test_mode": self.test_mode.get(),
             "segments": self.segments
         }
         
@@ -553,6 +566,7 @@ class RadioStationApp:
                 self.enable_ducking.set(config.get("enable_ducking", True))
                 self.ducking_db.set(config.get("ducking_db", -15))
                 self.duck_fade_duration.set(config.get("duck_fade_duration", 500))
+                self.test_mode.set(config.get("test_mode", False))
                 self.segments = config.get("segments", self.segments)
             except Exception as e:
                 print(f"Could not load config: {e}")
@@ -583,6 +597,11 @@ class RadioStationApp:
     def build_show(self):
         """Build the radio show (runs in separate thread)."""
         try:
+            # Check if test mode is enabled
+            if self.test_mode.get():
+                self.build_test_show()
+                return
+            
             self.log("🎙️ Starting radio show build...")
             
             if self.enable_ducking.get():
@@ -703,6 +722,137 @@ class RadioStationApp:
         finally:
             self.root.after(0, self.build_complete)
             
+    def build_test_show(self):
+        """Build a quick test preview: last 30s of song 1 → ducked voice → first 30s of song 2."""
+        try:
+            self.log("🧪 TEST MODE: Building quick preview...")
+            self.log("   Structure: Song 1 (last 30s) → Voice + Ducking → Song 2 (first 30s)")
+            
+            voice_dir = Path(self.voice_segments_dir.get())
+            songs_dir = Path(self.songs_dir.get())
+            output_dir = Path(self.output_dir.get())
+            
+            # Validate folders
+            if not voice_dir.exists():
+                raise FileNotFoundError(f"Voice segments folder not found: {voice_dir}")
+            if not songs_dir.exists():
+                raise FileNotFoundError(f"Songs folder not found: {songs_dir}")
+                
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Get songs (need at least 2)
+            songs = self.get_songs(songs_dir)
+            if len(songs) < 2:
+                raise FileNotFoundError("Need at least 2 songs for test mode!")
+            
+            # Get first available voice segment
+            voice_segments = self.get_voice_segments(voice_dir)
+            if not voice_segments:
+                raise FileNotFoundError("No voice segments found!")
+            
+            # Use the first non-intro/outro segment, or just the first one
+            voice_segment = None
+            for seg_name, seg_path in voice_segments:
+                if "intro" not in seg_name.lower() and "outro" not in seg_name.lower():
+                    voice_segment = (seg_name, seg_path)
+                    break
+            if voice_segment is None:
+                voice_segment = voice_segments[0]
+            
+            self.log(f"\n📂 Loading test assets...")
+            self.log(f"   Song 1: {songs[0].name}")
+            self.log(f"   Voice: {voice_segment[0]}")
+            self.log(f"   Song 2: {songs[1].name}")
+            
+            # Load Song 1 and get last 30 seconds
+            self.log("\n🎵 Processing Song 1 (last 30 seconds)...")
+            song1 = AudioSegment.from_file(str(songs[0]))
+            song1_end = song1[-30000:]  # Last 30 seconds
+            
+            # Load voice segment
+            self.log("🎤 Loading voice segment...")
+            voice = AudioSegment.from_file(str(voice_segment[1]))
+            voice = voice.fade_in(self.voice_fade_duration.get()).fade_out(self.voice_fade_duration.get())
+            
+            # Load Song 2 and get first 30 seconds
+            self.log("🎵 Processing Song 2 (first 30 seconds)...")
+            song2 = AudioSegment.from_file(str(songs[1]))
+            song2_start = song2[:30000]  # First 30 seconds
+            song2_start = song2_start.fade_in(self.song_fade_duration.get()).fade_out(self.song_fade_duration.get())
+            
+            # Ducking settings
+            duck_db = self.ducking_db.get()
+            duck_fade = self.duck_fade_duration.get()
+            crossfade = self.crossfade_duration.get()
+            
+            # Build the test show
+            self.log("\n🔨 Assembling test show...")
+            
+            # Start with Song 1 ending (fade out the end)
+            song1_end = song1_end.fade_out(duck_fade)
+            
+            # Create ducked section: music bed under voice
+            if self.enable_ducking.get():
+                self.log(f"   Applying ducking ({duck_db} dB) under voice...")
+                
+                # Create a music bed from end of song1 + start of song2
+                voice_length = len(voice)
+                
+                # Get last portion of song1 for the music bed
+                music_bed_length = voice_length + (crossfade * 2)
+                music_from_song1 = song1[-(music_bed_length):]
+                
+                # If song1 isn't long enough, loop it
+                if len(music_from_song1) < music_bed_length:
+                    loops = (music_bed_length // len(song1)) + 1
+                    music_from_song1 = (song1 * loops)[-music_bed_length:]
+                
+                # Duck the music bed
+                ducked_bed = music_from_song1 + duck_db
+                ducked_bed = ducked_bed.fade_in(duck_fade).fade_out(duck_fade)
+                
+                # Overlay voice centered on the ducked bed
+                silence_pad = (len(ducked_bed) - len(voice)) // 2
+                voice_section = ducked_bed.overlay(voice, position=silence_pad)
+            else:
+                voice_section = voice
+            
+            # Assemble: Song1 end → Voice section → Song2 start
+            final_show = song1_end.append(voice_section, crossfade=crossfade)
+            final_show = final_show.append(song2_start, crossfade=crossfade)
+            
+            # Export
+            self.log("\n💾 Exporting test preview...")
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = output_dir / f"test_preview_{timestamp}.mp3"
+            
+            final_show.export(
+                str(output_path),
+                format="mp3",
+                bitrate="192k"
+            )
+            
+            duration_seconds = len(final_show) / 1000
+            file_size_kb = output_path.stat().st_size / 1024
+            
+            self.log(f"\n✅ Test preview complete!")
+            self.log(f"   📍 Output: {output_path}")
+            self.log(f"   ⏱️  Duration: {duration_seconds:.1f} seconds")
+            self.log(f"   📦 File size: {file_size_kb:.1f} KB")
+            
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Test Complete!",
+                f"Test preview built successfully!\n\nDuration: {duration_seconds:.1f} seconds\nFile: {output_path.name}"
+            ))
+            
+        except Exception as e:
+            self.log(f"\n❌ Error: {e}")
+            self.root.after(0, lambda: messagebox.showerror("Build Error", str(e)))
+            
+        finally:
+            self.root.after(0, self.build_complete)
+    
     def create_ducked_segment(self, voice: AudioSegment, music_source: AudioSegment, 
                                duck_db: int, duck_fade: int) -> AudioSegment:
         """Create a voice segment with ducked music underneath."""
