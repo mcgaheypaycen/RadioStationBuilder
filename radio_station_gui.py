@@ -788,38 +788,56 @@ class RadioStationApp:
             # Build the test show
             self.log("\n🔨 Assembling test show...")
             
-            # Start with Song 1 ending (fade out the end)
-            song1_end = song1_end.fade_out(duck_fade)
+            voice_length = len(voice)
+            voice_fade = self.voice_fade_duration.get()
             
-            # Create ducked section: music bed under voice
             if self.enable_ducking.get():
-                self.log(f"   Applying ducking ({duck_db} dB) under voice...")
+                self.log(f"   Applying edge ducking ({duck_db} dB) - music only during voice fade in/out...")
                 
-                # Create a music bed from end of song1 + start of song2
-                voice_length = len(voice)
+                # === PART 1: Song 1 ending with ducked tail + voice intro ===
+                # Get the last portion of song1 that will overlap with voice start
+                overlap_duration = min(duck_fade + voice_fade, len(song1_end) // 2)
                 
-                # Get last portion of song1 for the music bed
-                music_bed_length = voice_length + (crossfade * 2)
-                music_from_song1 = song1[-(music_bed_length):]
+                # Song 1 main part (before overlap)
+                song1_main = song1_end[:-overlap_duration]
                 
-                # If song1 isn't long enough, loop it
-                if len(music_from_song1) < music_bed_length:
-                    loops = (music_bed_length // len(song1)) + 1
-                    music_from_song1 = (song1 * loops)[-music_bed_length:]
+                # Song 1 tail (will be ducked and overlaid with voice start)
+                song1_tail = song1_end[-overlap_duration:]
+                song1_tail_ducked = song1_tail + duck_db
+                song1_tail_ducked = song1_tail_ducked.fade_out(overlap_duration)
                 
-                # Duck the music bed
-                ducked_bed = music_from_song1 + duck_db
-                ducked_bed = ducked_bed.fade_in(duck_fade).fade_out(duck_fade)
+                # Voice intro portion
+                voice_intro = voice[:overlap_duration]
                 
-                # Overlay voice centered on the ducked bed
-                silence_pad = (len(ducked_bed) - len(voice)) // 2
-                voice_section = ducked_bed.overlay(voice, position=silence_pad)
+                # Overlay: ducked song1 tail + voice intro
+                transition_in = song1_tail_ducked.overlay(voice_intro)
+                
+                # === PART 2: Voice middle (no music) ===
+                voice_middle = voice[overlap_duration:-overlap_duration]
+                
+                # === PART 3: Voice outro + Song 2 beginning with ducked intro ===
+                # Voice outro portion
+                voice_outro = voice[-overlap_duration:]
+                
+                # Song 2 intro (will be ducked and overlaid with voice end)
+                song2_intro = song2_start[:overlap_duration]
+                song2_intro_ducked = song2_intro + duck_db
+                song2_intro_ducked = song2_intro_ducked.fade_in(overlap_duration)
+                
+                # Overlay: voice outro + ducked song2 intro
+                transition_out = song2_intro_ducked.overlay(voice_outro)
+                
+                # Song 2 main part (after overlap)
+                song2_main = song2_start[overlap_duration:]
+                
+                # === ASSEMBLE ===
+                final_show = song1_main + transition_in + voice_middle + transition_out + song2_main
+                
             else:
-                voice_section = voice
-            
-            # Assemble: Song1 end → Voice section → Song2 start
-            final_show = song1_end.append(voice_section, crossfade=crossfade)
-            final_show = final_show.append(song2_start, crossfade=crossfade)
+                # No ducking - just crossfade
+                song1_end = song1_end.fade_out(crossfade)
+                final_show = song1_end.append(voice, crossfade=crossfade)
+                final_show = final_show.append(song2_start, crossfade=crossfade)
             
             # Export
             self.log("\n💾 Exporting test preview...")
@@ -855,33 +873,56 @@ class RadioStationApp:
     
     def create_ducked_segment(self, voice: AudioSegment, music_source: AudioSegment, 
                                duck_db: int, duck_fade: int) -> AudioSegment:
-        """Create a voice segment with ducked music underneath."""
+        """Create a voice segment with ducked music only at the edges (fade in/out portions).
+        
+        The structure is:
+        1. Ducked music fading out + voice intro (overlaid)
+        2. Voice middle plays alone (no music)
+        3. Voice outro + ducked music fading in (overlaid)
+        """
         try:
-            # Get the music for the bed (use a portion of the last song)
-            music_bed = music_source
-            
-            # Ensure music bed is long enough for the voice
             voice_length = len(voice)
-            if len(music_bed) < voice_length:
-                # Loop the music if needed
-                loops_needed = (voice_length // len(music_bed)) + 1
-                music_bed = music_bed * loops_needed
+            voice_fade = self.voice_fade_duration.get()
             
-            # Trim to voice length plus some padding
-            music_bed = music_bed[:voice_length]
+            # Calculate overlap duration (where music and voice overlap)
+            overlap_duration = min(duck_fade + voice_fade, voice_length // 3)
             
-            # Apply ducking (lower volume)
-            ducked_bed = music_bed + duck_db
+            if overlap_duration < 100:
+                # Voice too short for proper ducking, return as-is
+                return voice
             
-            # Apply fade in/out to the ducked bed
-            fade_duration = min(duck_fade, len(ducked_bed) // 4)
-            if fade_duration > 0:
-                ducked_bed = ducked_bed.fade_in(fade_duration).fade_out(fade_duration)
+            # === PART 1: Ducked music tail + voice intro ===
+            # Get music for the intro overlap
+            music_for_intro = music_source[-overlap_duration:] if len(music_source) >= overlap_duration else music_source
+            if len(music_for_intro) < overlap_duration:
+                # Pad with silence if music is too short
+                music_for_intro = AudioSegment.silent(duration=overlap_duration - len(music_for_intro)) + music_for_intro
             
-            # Overlay voice on top of ducked music
-            mixed = ducked_bed.overlay(voice)
+            music_intro_ducked = music_for_intro + duck_db
+            music_intro_ducked = music_intro_ducked.fade_out(overlap_duration)
             
-            return mixed
+            voice_intro = voice[:overlap_duration]
+            transition_in = music_intro_ducked.overlay(voice_intro)
+            
+            # === PART 2: Voice middle (no music) ===
+            voice_middle = voice[overlap_duration:-overlap_duration] if voice_length > overlap_duration * 2 else AudioSegment.empty()
+            
+            # === PART 3: Voice outro + ducked music intro ===
+            music_for_outro = music_source[:overlap_duration] if len(music_source) >= overlap_duration else music_source
+            if len(music_for_outro) < overlap_duration:
+                # Pad with silence if music is too short
+                music_for_outro = music_for_outro + AudioSegment.silent(duration=overlap_duration - len(music_for_outro))
+            
+            music_outro_ducked = music_for_outro + duck_db
+            music_outro_ducked = music_outro_ducked.fade_in(overlap_duration)
+            
+            voice_outro = voice[-overlap_duration:]
+            transition_out = music_outro_ducked.overlay(voice_outro)
+            
+            # === ASSEMBLE ===
+            result = transition_in + voice_middle + transition_out
+            
+            return result
             
         except Exception as e:
             self.log(f"   Warning: Ducking failed ({e}), using voice only")
