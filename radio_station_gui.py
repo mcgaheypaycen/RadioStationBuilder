@@ -21,6 +21,16 @@ try:
 except ImportError:
     AudioSegment = None
 
+# Import watchdog for file watching
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    Observer = None
+    FileSystemEventHandler = object
+
 
 class RadioStationApp:
     """Main GUI Application for Radio Station Builder."""
@@ -56,6 +66,14 @@ class RadioStationApp:
         # Test mode
         self.test_mode = BooleanVar(value=False)
         
+        # Auto-watch settings
+        self.auto_watch_enabled = BooleanVar(value=False)
+        self.auto_watch_delay = IntVar(value=5)  # Seconds to wait after last file change
+        self.is_watching = False
+        self.observer = None
+        self.last_change_time = None
+        self.watch_timer = None
+        
         # Default segment order
         self.segments = [
             "001_intro",
@@ -75,6 +93,10 @@ class RadioStationApp:
         
         # Create UI
         self.create_ui()
+        
+        # Auto-start watcher if enabled
+        if self.auto_watch_enabled.get() and WATCHDOG_AVAILABLE:
+            self.root.after(1000, self.start_watching)
         
     def create_ui(self):
         """Create the main UI."""
@@ -113,6 +135,11 @@ class RadioStationApp:
         ducking_frame = ttk.Frame(notebook, padding="10")
         notebook.add(ducking_frame, text="🎚️ Ducking")
         self.create_ducking_tab(ducking_frame)
+        
+        # Tab 5: Auto-Watch
+        watch_frame = ttk.Frame(notebook, padding="10")
+        notebook.add(watch_frame, text="👁️ Auto-Watch")
+        self.create_watch_tab(watch_frame)
         
         # Test mode checkbox and Build button frame
         build_frame = ttk.Frame(main_frame)
@@ -365,6 +392,232 @@ class RadioStationApp:
         """Disable ducking."""
         self.enable_ducking.set(False)
         self.log("Ducking disabled")
+    
+    def create_watch_tab(self, parent):
+        """Create the auto-watch settings tab."""
+        # Check if watchdog is available
+        if not WATCHDOG_AVAILABLE:
+            ttk.Label(
+                parent,
+                text="⚠️ Auto-Watch requires the 'watchdog' library.\n\n"
+                     "Install it with: pip install watchdog",
+                font=("Segoe UI", 11),
+                foreground="red"
+            ).pack(pady=20)
+            return
+        
+        # Enable auto-watch checkbox
+        ttk.Checkbutton(
+            parent,
+            text="Enable Auto-Watch Mode",
+            variable=self.auto_watch_enabled,
+            command=self.toggle_watch
+        ).pack(anchor=W, pady=(10, 5))
+        
+        # Explanation
+        explanation = ttk.Label(
+            parent,
+            text="When enabled, the app monitors your voice segments folder.\n"
+                 "It automatically builds the radio show when all segments are detected.",
+            font=("Segoe UI", 9, "italic"),
+            foreground="gray"
+        )
+        explanation.pack(anchor=W, pady=(0, 20))
+        
+        # Watch delay setting
+        delay_frame = ttk.Frame(parent)
+        delay_frame.pack(fill=X, pady=10)
+        
+        ttk.Label(delay_frame, text="Build Delay (seconds):", font=("Segoe UI", 10, "bold"), width=25).pack(side=LEFT)
+        ttk.Spinbox(
+            delay_frame,
+            from_=1,
+            to=30,
+            textvariable=self.auto_watch_delay,
+            width=8,
+            font=("Segoe UI", 11)
+        ).pack(side=LEFT, padx=10)
+        ttk.Label(
+            delay_frame,
+            text="Wait time after last file change",
+            font=("Segoe UI", 9, "italic"),
+            foreground="gray"
+        ).pack(side=LEFT, padx=10)
+        
+        # Status display
+        ttk.Separator(parent, orient=HORIZONTAL).pack(fill=X, pady=20)
+        ttk.Label(parent, text="Watch Status:", font=("Segoe UI", 10, "bold")).pack(anchor=W)
+        
+        self.watch_status_var = StringVar(value="⏹️ Not watching")
+        self.watch_status_label = ttk.Label(
+            parent,
+            textvariable=self.watch_status_var,
+            font=("Segoe UI", 12)
+        )
+        self.watch_status_label.pack(anchor=W, pady=10)
+        
+        # Expected files display
+        ttk.Separator(parent, orient=HORIZONTAL).pack(fill=X, pady=20)
+        ttk.Label(parent, text="Expected Segment Files:", font=("Segoe UI", 10, "bold")).pack(anchor=W)
+        
+        files_text = "\n".join([f"• {seg}.mp3" for seg in self.segments])
+        ttk.Label(
+            parent,
+            text=files_text,
+            font=("Consolas", 10),
+            justify=LEFT
+        ).pack(anchor=W, pady=10)
+        
+        # Manual check button
+        ttk.Button(
+            parent,
+            text="🔍 Check Files Now",
+            command=self.check_segments_exist
+        ).pack(anchor=W, pady=10)
+        
+        self.files_status_var = StringVar(value="")
+        ttk.Label(
+            parent,
+            textvariable=self.files_status_var,
+            font=("Segoe UI", 10)
+        ).pack(anchor=W)
+    
+    def toggle_watch(self):
+        """Toggle the file watcher on/off."""
+        if self.auto_watch_enabled.get():
+            self.start_watching()
+        else:
+            self.stop_watching()
+    
+    def start_watching(self):
+        """Start watching the voice segments folder."""
+        if not WATCHDOG_AVAILABLE:
+            messagebox.showerror("Error", "watchdog library not installed!")
+            self.auto_watch_enabled.set(False)
+            return
+        
+        if self.is_watching:
+            return
+        
+        watch_path = Path(self.voice_segments_dir.get())
+        if not watch_path.exists():
+            messagebox.showerror("Error", f"Voice segments folder not found:\n{watch_path}")
+            self.auto_watch_enabled.set(False)
+            return
+        
+        # Create event handler
+        app = self
+        
+        class SegmentHandler(FileSystemEventHandler):
+            def on_created(self, event):
+                if not event.is_directory and event.src_path.endswith('.mp3'):
+                    app.on_segment_change(event.src_path)
+            
+            def on_modified(self, event):
+                if not event.is_directory and event.src_path.endswith('.mp3'):
+                    app.on_segment_change(event.src_path)
+        
+        self.observer = Observer()
+        self.observer.schedule(SegmentHandler(), str(watch_path), recursive=False)
+        self.observer.start()
+        self.is_watching = True
+        
+        self.watch_status_var.set("👁️ Watching for new segments...")
+        self.log("🔍 Auto-watch started - monitoring voice segments folder")
+    
+    def stop_watching(self):
+        """Stop watching the voice segments folder."""
+        if self.observer:
+            self.observer.stop()
+            self.observer.join(timeout=2)
+            self.observer = None
+        
+        if self.watch_timer:
+            self.root.after_cancel(self.watch_timer)
+            self.watch_timer = None
+        
+        self.is_watching = False
+        self.watch_status_var.set("⏹️ Not watching")
+        self.log("⏹️ Auto-watch stopped")
+    
+    def on_segment_change(self, filepath):
+        """Called when a segment file is created or modified."""
+        self.last_change_time = datetime.now()
+        filename = Path(filepath).name
+        
+        # Update status on main thread
+        self.root.after(0, lambda: self.watch_status_var.set(f"📥 Detected: {filename}"))
+        self.root.after(0, lambda: self.log(f"📥 File detected: {filename}"))
+        
+        # Cancel any existing timer
+        if self.watch_timer:
+            self.root.after_cancel(self.watch_timer)
+        
+        # Start a new timer
+        delay_ms = self.auto_watch_delay.get() * 1000
+        self.watch_timer = self.root.after(delay_ms, self.check_and_build)
+    
+    def check_and_build(self):
+        """Check if all segments exist and trigger build."""
+        self.watch_timer = None
+        
+        if self.is_building:
+            self.log("⏳ Build already in progress, skipping...")
+            return
+        
+        voice_dir = Path(self.voice_segments_dir.get())
+        missing = []
+        found = []
+        
+        for segment in self.segments:
+            segment_file = None
+            for ext in ['.mp3', '.wav', '.m4a', '.ogg']:
+                candidate = voice_dir / f"{segment}{ext}"
+                if candidate.exists():
+                    segment_file = candidate
+                    break
+            
+            if segment_file:
+                found.append(segment)
+            else:
+                missing.append(segment)
+        
+        if missing:
+            self.watch_status_var.set(f"⏳ Waiting... ({len(found)}/7 segments)")
+            self.log(f"⏳ Missing segments: {', '.join(missing)}")
+        else:
+            self.watch_status_var.set("✅ All segments found! Building...")
+            self.log("✅ All 7 segments detected - starting auto-build!")
+            self.root.after(500, self.start_build)
+    
+    def check_segments_exist(self):
+        """Manually check which segment files exist."""
+        voice_dir = Path(self.voice_segments_dir.get())
+        
+        if not voice_dir.exists():
+            self.files_status_var.set("❌ Folder not found!")
+            return
+        
+        found = []
+        missing = []
+        
+        for segment in self.segments:
+            segment_file = None
+            for ext in ['.mp3', '.wav', '.m4a', '.ogg']:
+                candidate = voice_dir / f"{segment}{ext}"
+                if candidate.exists():
+                    segment_file = candidate
+                    break
+            
+            if segment_file:
+                found.append(segment)
+            else:
+                missing.append(segment)
+        
+        if missing:
+            self.files_status_var.set(f"Found {len(found)}/7 — Missing: {', '.join(missing)}")
+        else:
+            self.files_status_var.set("✅ All 7 segments found!")
         
     def browse_folder(self, var: StringVar):
         """Open folder browser dialog."""
@@ -535,6 +788,8 @@ class RadioStationApp:
             "ducking_db": self.ducking_db.get(),
             "duck_fade_duration": self.duck_fade_duration.get(),
             "test_mode": self.test_mode.get(),
+            "auto_watch_enabled": self.auto_watch_enabled.get(),
+            "auto_watch_delay": self.auto_watch_delay.get(),
             "segments": self.segments
         }
         
@@ -567,6 +822,8 @@ class RadioStationApp:
                 self.ducking_db.set(config.get("ducking_db", -15))
                 self.duck_fade_duration.set(config.get("duck_fade_duration", 500))
                 self.test_mode.set(config.get("test_mode", False))
+                self.auto_watch_enabled.set(config.get("auto_watch_enabled", False))
+                self.auto_watch_delay.set(config.get("auto_watch_delay", 5))
                 self.segments = config.get("segments", self.segments)
             except Exception as e:
                 print(f"Could not load config: {e}")
@@ -1031,6 +1288,7 @@ def main():
     
     # Save config on close
     def on_closing():
+        app.stop_watching()
         app.save_config()
         root.destroy()
         
