@@ -10,6 +10,8 @@
   "ducking_db": -8,
   "duck_fade_duration": 800,
   "test_mode": false,
+  "require_fresh_files": true,
+  "freshness_minutes": 5,
   "auto_watch_enabled": true,
   "auto_watch_delay": 5,
   "segments": [

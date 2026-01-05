@@ -579,7 +579,7 @@ class RadioStationApp:
         self.watch_timer = self.root.after(delay_ms, self.check_and_build)
     
     def check_and_build(self):
-        """Check if all segments exist and trigger build."""
+        """Check if all segments exist AND are fresh, then trigger build."""
         self.watch_timer = None
         
         if self.is_building:
@@ -588,7 +588,9 @@ class RadioStationApp:
         
         voice_dir = Path(self.voice_segments_dir.get())
         missing = []
-        found = []
+        found = []  # List of (segment_name, segment_path)
+        max_age_minutes = self.freshness_minutes.get()
+        now = datetime.now()
         
         for segment in self.segments:
             segment_file = None
@@ -599,28 +601,53 @@ class RadioStationApp:
                     break
             
             if segment_file:
-                found.append(segment)
+                found.append((segment, segment_file))
             else:
                 missing.append(segment)
         
+        total_segments = len(self.segments)
+        
         if missing:
-            self.watch_status_var.set(f"⏳ Waiting... ({len(found)}/7 segments)")
+            self.watch_status_var.set(f"⏳ Waiting... ({len(found)}/{total_segments} segments)")
             self.log(f"⏳ Missing segments: {', '.join(missing)}")
+            return
+        
+        # All segments exist - now check if ALL are fresh
+        stale_files = []
+        fresh_count = 0
+        
+        for segment_name, segment_path in found:
+            mtime = datetime.fromtimestamp(segment_path.stat().st_mtime)
+            age_minutes = (now - mtime).total_seconds() / 60
+            
+            if age_minutes <= max_age_minutes:
+                fresh_count += 1
+            else:
+                stale_files.append((segment_name, round(age_minutes, 1)))
+        
+        if stale_files:
+            self.watch_status_var.set(f"⏳ Waiting for fresh files... ({fresh_count}/{total_segments} fresh)")
+            stale_names = ", ".join([f"{name} ({age}m old)" for name, age in stale_files[:3]])
+            if len(stale_files) > 3:
+                stale_names += f" +{len(stale_files) - 3} more"
+            self.log(f"⏳ Stale segments (>{max_age_minutes}m old): {stale_names}")
         else:
-            self.watch_status_var.set("✅ All segments found! Building...")
-            self.log("✅ All 7 segments detected - starting auto-build!")
+            self.watch_status_var.set(f"✅ All {total_segments} fresh segments found! Building...")
+            self.log(f"✅ All {total_segments} fresh segments detected - starting auto-build!")
             self.root.after(500, self.start_build)
     
     def check_segments_exist(self):
-        """Manually check which segment files exist."""
+        """Manually check which segment files exist and their freshness."""
         voice_dir = Path(self.voice_segments_dir.get())
         
         if not voice_dir.exists():
             self.files_status_var.set("❌ Folder not found!")
             return
         
-        found = []
+        found = []  # (segment_name, segment_path)
         missing = []
+        max_age_minutes = self.freshness_minutes.get()
+        now = datetime.now()
         
         for segment in self.segments:
             segment_file = None
@@ -631,14 +658,36 @@ class RadioStationApp:
                     break
             
             if segment_file:
-                found.append(segment)
+                found.append((segment, segment_file))
             else:
                 missing.append(segment)
         
+        total_segments = len(self.segments)
+        
         if missing:
-            self.files_status_var.set(f"Found {len(found)}/7 — Missing: {', '.join(missing)}")
+            self.files_status_var.set(f"Found {len(found)}/{total_segments} — Missing: {', '.join(missing)}")
+            return
+        
+        # Check freshness
+        fresh_count = 0
+        stale_files = []
+        
+        for segment_name, segment_path in found:
+            mtime = datetime.fromtimestamp(segment_path.stat().st_mtime)
+            age_minutes = (now - mtime).total_seconds() / 60
+            
+            if age_minutes <= max_age_minutes:
+                fresh_count += 1
+            else:
+                stale_files.append((segment_name, round(age_minutes, 1)))
+        
+        if stale_files:
+            stale_info = ", ".join([f"{name} ({age}m)" for name, age in stale_files[:2]])
+            if len(stale_files) > 2:
+                stale_info += f" +{len(stale_files) - 2} more"
+            self.files_status_var.set(f"⚠️ {fresh_count}/{total_segments} fresh — Stale: {stale_info}")
         else:
-            self.files_status_var.set("✅ All 7 segments found!")
+            self.files_status_var.set(f"✅ All {total_segments} segments found & fresh!")
         
     def browse_folder(self, var: StringVar):
         """Open folder browser dialog."""
