@@ -10,6 +10,8 @@
   "ducking_db": -8,
   "duck_fade_duration": 800,
   "test_mode": false,
+  "auto_watch_enabled": true,
+  "auto_watch_delay": 5,
   "segments": [
     "001_intro",
     "002_wellness",
