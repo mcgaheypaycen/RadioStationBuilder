@@ -66,6 +66,10 @@ class RadioStationApp:
         # Test mode
         self.test_mode = BooleanVar(value=False)
         
+        # Freshness check settings
+        self.require_fresh_files = BooleanVar(value=True)
+        self.freshness_minutes = IntVar(value=5)  # Files must be created within this many minutes
+        
         # Auto-watch settings
         self.auto_watch_enabled = BooleanVar(value=False)
         self.auto_watch_delay = IntVar(value=5)  # Seconds to wait after last file change
@@ -150,6 +154,23 @@ class RadioStationApp:
             text="🧪 Test Mode (quick preview)",
             variable=self.test_mode
         ).pack(side=LEFT, padx=(0, 20))
+        
+        ttk.Checkbutton(
+            build_frame,
+            text="⏱️ Require fresh files",
+            variable=self.require_fresh_files
+        ).pack(side=LEFT, padx=(0, 5))
+        
+        ttk.Spinbox(
+            build_frame,
+            from_=1,
+            to=30,
+            textvariable=self.freshness_minutes,
+            width=3,
+            font=("Segoe UI", 9)
+        ).pack(side=LEFT, padx=(0, 5))
+        
+        ttk.Label(build_frame, text="min", font=("Segoe UI", 9)).pack(side=LEFT, padx=(0, 20))
         
         self.build_btn = ttk.Button(
             build_frame,
@@ -788,6 +809,8 @@ class RadioStationApp:
             "ducking_db": self.ducking_db.get(),
             "duck_fade_duration": self.duck_fade_duration.get(),
             "test_mode": self.test_mode.get(),
+            "require_fresh_files": self.require_fresh_files.get(),
+            "freshness_minutes": self.freshness_minutes.get(),
             "auto_watch_enabled": self.auto_watch_enabled.get(),
             "auto_watch_delay": self.auto_watch_delay.get(),
             "segments": self.segments
@@ -822,6 +845,8 @@ class RadioStationApp:
                 self.ducking_db.set(config.get("ducking_db", -15))
                 self.duck_fade_duration.set(config.get("duck_fade_duration", 500))
                 self.test_mode.set(config.get("test_mode", False))
+                self.require_fresh_files.set(config.get("require_fresh_files", True))
+                self.freshness_minutes.set(config.get("freshness_minutes", 5))
                 self.auto_watch_enabled.set(config.get("auto_watch_enabled", False))
                 self.auto_watch_delay.set(config.get("auto_watch_delay", 5))
                 self.segments = config.get("segments", self.segments)
@@ -885,6 +910,15 @@ class RadioStationApp:
             
             if not voice_segments:
                 raise FileNotFoundError("No voice segments found!")
+            
+            # Check file freshness if enabled
+            if self.require_fresh_files.get():
+                self.log(f"⏱️ Checking file freshness (max {self.freshness_minutes.get()} minutes)...")
+                all_fresh, stale_files = self.check_files_freshness(voice_segments)
+                
+                if not all_fresh:
+                    stale_list = ", ".join([f"{name} ({age}m old)" for name, age in stale_files])
+                    raise ValueError(f"Stale files detected! These files are too old:\n{stale_list}\n\nRun your n8n workflow to generate fresh voice segments.")
             
             # Get songs
             self.log("🎵 Loading songs...")
@@ -1192,6 +1226,26 @@ class RadioStationApp:
         self.progress.stop()
         self.status_var.set("Ready")
         
+    def check_files_freshness(self, voice_segments: list) -> tuple:
+        """Check if all voice segment files were created within the freshness window.
+        
+        Returns:
+            tuple: (all_fresh: bool, stale_files: list of (name, age_minutes))
+        """
+        max_age_minutes = self.freshness_minutes.get()
+        now = datetime.now()
+        stale_files = []
+        
+        for segment_name, segment_path in voice_segments:
+            # Get file modification time
+            mtime = datetime.fromtimestamp(segment_path.stat().st_mtime)
+            age_minutes = (now - mtime).total_seconds() / 60
+            
+            if age_minutes > max_age_minutes:
+                stale_files.append((segment_name, round(age_minutes, 1)))
+        
+        return (len(stale_files) == 0, stale_files)
+    
     def get_voice_segments(self, voice_dir: Path) -> list:
         """Get voice segments in configured order."""
         segments = []
